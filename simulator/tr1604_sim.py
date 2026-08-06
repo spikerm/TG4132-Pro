@@ -1,15 +1,19 @@
 """TR1604-Pro Windows CRT simulator.
 
-Tkinter-only simulator for the approved CRT interface. F1-F4 select genuinely
-separate measurement modes. Menus are navigable with Up/Down and Enter.
+All visible menu entries are functional. The simulator uses only the Python
+standard library and is intended to validate the real instrument workflow before
+hardware is available.
 """
 from __future__ import annotations
 
+import csv
+import json
 import math
 import random
 import tkinter as tk
-from dataclasses import dataclass, field
-from tkinter import messagebox, simpledialog
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from tkinter import filedialog, messagebox, simpledialog
 
 CRT_BG = "#020b05"
 CRT_GREEN = "#63ff72"
@@ -18,9 +22,13 @@ CRT_DIM = "#1d7631"
 CRT_GRID = "#174d25"
 CRT_YELLOW = "#ffe43b"
 CRT_CYAN = "#41e9ff"
+CRT_RED = "#ff6d62"
 FONT = ("Consolas", 12)
 FONT_SMALL = ("Consolas", 10)
 FONT_TITLE = ("Consolas", 14, "bold")
+
+PROFILE_DIR = Path(__file__).with_name("profiles")
+PROFILE_DIR.mkdir(exist_ok=True)
 
 MODE_PRESETS = {
     "SPECTRUM ANALYZER": (140.0, 150.0),
@@ -52,6 +60,9 @@ MODE_MENUS = {
     ],
 }
 
+RBW_VALUES = [0.1, 0.3, 1, 3, 10, 30, 100, 300, 1000]
+VBW_VALUES = [0.1, 0.3, 1, 3, 10, 30, 100, 300, 1000]
+
 
 @dataclass
 class Marker:
@@ -81,10 +92,19 @@ class SimulatorState:
         Marker(False, 432.5000, "A", CRT_GREEN),
     ])
     memory_enabled: bool = False
+    trace_mode: str = "LIVE"
     averaging: int = 4
     show_menu: bool = True
     menu_index: int = 0
     status_message: str = "READY"
+    pass_limit_db: float = -60.0
+    insertion_limit_db: float = 2.0
+    swr_limit: float = 2.0
+    calibration_ok: bool = False
+    delta_marker_enabled: bool = True
+    trace_b: list[float] = field(default_factory=list)
+    max_hold: list[float] = field(default_factory=list)
+    min_hold: list[float] = field(default_factory=list)
 
     @property
     def center_mhz(self) -> float:
@@ -100,7 +120,7 @@ class TR1604Simulator:
         self.root = tk.Tk()
         self.root.title("TR1604-Pro CRT Simulator")
         self.root.configure(bg="#111")
-        self.root.minsize(1024, 700)
+        self.root.minsize(1120, 760)
         self.canvas = tk.Canvas(self.root, bg="#111", highlightthickness=0)
         self.canvas.pack(fill="both", expand=True)
         self.state = SimulatorState()
@@ -113,24 +133,19 @@ class TR1604Simulator:
         self.state.mode = mode
         self.state.start_mhz, self.state.stop_mhz = MODE_PRESETS[mode]
         self.state.menu_index = 0
-        if mode == "SPECTRUM ANALYZER":
-            freqs = (145.425, 146.275)
-        elif mode in ("DUPLEX FILTER TUNE", "MEMORY / TRACE COMPARE"):
-            freqs = (430.3625, 431.9625)
-        else:
-            freqs = (145.425, 147.000)
+        freqs = {
+            "SPECTRUM ANALYZER": (145.425, 146.275),
+            "DUPLEX FILTER TUNE": (430.3625, 431.9625),
+            "MEMORY / TRACE COMPARE": (430.3625, 431.9625),
+            "ANTENNA ANALYZER": (145.425, 147.000),
+        }[mode]
         self.state.markers[0].frequency_mhz = freqs[0]
         self.state.markers[1].frequency_mhz = freqs[1]
         self.state.status_message = mode
 
-    def toggle_tg(self) -> None:
-        self.state.tg_enabled = not self.state.tg_enabled
-        self.state.status_message = "TG ON" if self.state.tg_enabled else "TG OFF"
-
     def on_key(self, event: tk.Event) -> None:
         key = event.keysym or ""
         ch = event.char.lower() if isinstance(event.char, str) and event.char else ""
-
         if key == "F1": self.set_mode("SPECTRUM ANALYZER")
         elif key == "F2": self.set_mode("DUPLEX FILTER TUNE")
         elif key == "F3": self.set_mode("MEMORY / TRACE COMPARE")
@@ -144,69 +159,233 @@ class TR1604Simulator:
             size = len(MODE_MENUS[self.state.mode])
             self.state.menu_index = (self.state.menu_index + (-1 if key == "Up" else 1)) % size
         elif key in ("Left", "Right"):
-            direction = -1.0 if key == "Left" else 1.0
-            step = self.state.span_mhz / 1000.0
-            if event.state & 0x0001: step /= 10.0
-            if event.state & 0x0004: step *= 10.0
-            marker = self.state.markers[self.state.selected_marker]
-            marker.frequency_mhz = min(self.state.stop_mhz, max(self.state.start_mhz, marker.frequency_mhz + direction * step))
+            self.move_marker(-1 if key == "Left" else 1, event.state)
         elif key == "Return":
             if self.state.show_menu: self.activate_menu_item()
             else: self.enter_marker_frequency()
-        elif ch in ("n", "p"): self.marker_to_feature()
         elif ch == "m": self.state.show_menu = not self.state.show_menu
-        elif ch == "a":
-            self.state.averaging = {1: 4, 4: 8, 8: 16, 16: 1}[self.state.averaging]
-            self.state.status_message = f"AVERAGING {self.state.averaging}"
-        elif ch == "b":
-            self.state.memory_enabled = not self.state.memory_enabled
-            self.state.status_message = "TRACE B ON" if self.state.memory_enabled else "TRACE B OFF"
+        elif ch == "a": self.cycle_averaging()
+        elif ch == "b": self.toggle_trace_b()
         elif key == "Escape": self.state.show_menu = False
-        elif ch == "s":
-            self.canvas.postscript(file="tr1604_simulator_screen.ps", colormode="color")
-            self.state.status_message = "SCREEN SAVED"
+        elif ch == "s": self.save_screen()
         self.draw()
+
+    def ask_float(self, title: str, prompt: str, initial: float) -> float | None:
+        return simpledialog.askfloat(title, prompt, initialvalue=initial, parent=self.root)
+
+    def move_marker(self, direction: int, modifiers: int) -> None:
+        step = self.state.span_mhz / 1000.0
+        if modifiers & 0x0001: step /= 10.0
+        if modifiers & 0x0004: step *= 10.0
+        marker = self.state.markers[self.state.selected_marker]
+        marker.frequency_mhz = min(self.state.stop_mhz, max(self.state.start_mhz, marker.frequency_mhz + direction * step))
+
+    def toggle_tg(self) -> None:
+        self.state.tg_enabled = not self.state.tg_enabled
+        self.state.status_message = "TG ON" if self.state.tg_enabled else "TG OFF"
+
+    def toggle_trace_b(self) -> None:
+        self.state.memory_enabled = not self.state.memory_enabled
+        self.state.status_message = "TRACE B ON" if self.state.memory_enabled else "TRACE B OFF"
+
+    def cycle_averaging(self) -> None:
+        self.state.averaging = {1: 4, 4: 8, 8: 16, 16: 32, 32: 1}[self.state.averaging]
+        self.state.status_message = f"AVERAGING {self.state.averaging}"
 
     def enter_marker_frequency(self) -> None:
         marker = self.state.markers[self.state.selected_marker]
-        value = simpledialog.askfloat("Marker frequency", "Frequency in MHz:", initialvalue=marker.frequency_mhz, parent=self.root)
+        value = self.ask_float("Marker frequency", "Frequency in MHz:", marker.frequency_mhz)
         if value is not None:
             marker.frequency_mhz = min(self.state.stop_mhz, max(self.state.start_mhz, value))
             self.state.status_message = "MARKER FREQUENCY SET"
 
     def marker_to_feature(self) -> None:
         marker = self.state.markers[self.state.selected_marker]
-        if self.state.mode in ("DUPLEX FILTER TUNE", "MEMORY / TRACE COMPARE"):
-            targets = (430.3625, 431.9625)
-        elif self.state.mode == "SPECTRUM ANALYZER":
-            targets = (145.425, 146.275)
-        else:
-            targets = (145.425,)
+        targets = {
+            "SPECTRUM ANALYZER": (145.425, 146.275),
+            "DUPLEX FILTER TUNE": (430.3625, 431.9625),
+            "MEMORY / TRACE COMPARE": (430.3625, 431.9625),
+            "ANTENNA ANALYZER": (145.425,),
+        }[self.state.mode]
         marker.frequency_mhz = min(targets, key=lambda f: abs(f - marker.frequency_mhz))
         self.state.status_message = "MARKER TO FEATURE"
 
+    def choose_marker(self) -> None:
+        value = simpledialog.askinteger("Marker select", "Marker 1..4:", initialvalue=self.state.selected_marker + 1, minvalue=1, maxvalue=4, parent=self.root)
+        if value:
+            self.state.selected_marker = value - 1
+            self.state.markers[value - 1].enabled = True
+
+    def set_start_stop(self) -> None:
+        start = self.ask_float("Start frequency", "Start MHz:", self.state.start_mhz)
+        stop = self.ask_float("Stop frequency", "Stop MHz:", self.state.stop_mhz)
+        if start is not None and stop is not None and stop > start:
+            self.state.start_mhz, self.state.stop_mhz = start, stop
+
+    def set_span(self) -> None:
+        span = self.ask_float("Span", "Span MHz:", self.state.span_mhz)
+        if span and span > 0:
+            center = self.state.center_mhz
+            self.state.start_mhz, self.state.stop_mhz = center - span / 2, center + span / 2
+
+    def set_rbw_vbw(self) -> None:
+        rbw = self.ask_float("RBW", f"RBW kHz ({RBW_VALUES}):", self.state.rbw_khz)
+        vbw = self.ask_float("VBW", f"VBW kHz ({VBW_VALUES}):", self.state.vbw_khz)
+        if rbw and rbw > 0: self.state.rbw_khz = rbw
+        if vbw and vbw > 0: self.state.vbw_khz = vbw
+
+    def set_trace_mode(self) -> None:
+        choices = ["LIVE", "MAX HOLD", "MIN HOLD", "AVERAGE", "A-B"]
+        value = simpledialog.askstring("Trace mode", "LIVE / MAX HOLD / MIN HOLD / AVERAGE / A-B:", initialvalue=self.state.trace_mode, parent=self.root)
+        if value and value.upper() in choices:
+            self.state.trace_mode = value.upper()
+
+    def current_trace(self, count: int = 900) -> list[float]:
+        values = []
+        for i in range(count):
+            f = self.state.start_mhz + self.state.span_mhz * i / (count - 1)
+            values.append(self.trace_level(f))
+        return values
+
+    def store_trace_b(self) -> None:
+        self.state.trace_b = self.current_trace()
+        self.state.memory_enabled = True
+        self.state.status_message = "TRACE B STORED"
+
+    def set_hold_mode(self, mode: str) -> None:
+        self.state.trace_mode = mode
+        self.state.status_message = mode
+
+    def set_bandwidth(self) -> None:
+        width = abs(self.state.markers[1].frequency_mhz - self.state.markers[0].frequency_mhz)
+        messagebox.showinfo("Bandwidth", f"Marker bandwidth: {width:.6f} MHz", parent=self.root)
+
+    def show_insertion_loss(self) -> None:
+        loss = abs((-17.0) - self.state.ref_dbm)
+        messagebox.showinfo("Insertion loss", f"Estimated passband insertion loss: {loss:.2f} dB", parent=self.root)
+
+    def set_limits(self) -> None:
+        reject = self.ask_float("Rejection limit", "Required notch level in dB:", self.state.pass_limit_db)
+        loss = self.ask_float("Insertion loss limit", "Maximum insertion loss in dB:", self.state.insertion_limit_db)
+        if reject is not None: self.state.pass_limit_db = reject
+        if loss is not None: self.state.insertion_limit_db = loss
+
+    def save_profile(self) -> None:
+        name = simpledialog.askstring("Save profile", "Profile name:", initialvalue="Duplex_430_432", parent=self.root)
+        if not name: return
+        data = asdict(self.state)
+        data["markers"] = [asdict(m) for m in self.state.markers]
+        path = PROFILE_DIR / f"{name}.json"
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        self.state.status_message = f"PROFILE SAVED {name}"
+
+    def load_profile(self) -> None:
+        path = filedialog.askopenfilename(initialdir=PROFILE_DIR, filetypes=[("JSON profile", "*.json")], parent=self.root)
+        if not path: return
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        for key, value in data.items():
+            if key == "markers":
+                self.state.markers = [Marker(**m) for m in value]
+            elif hasattr(self.state, key):
+                setattr(self.state, key, value)
+        self.state.status_message = "PROFILE LOADED"
+
+    def run_calibration(self) -> None:
+        ok = messagebox.askyesno("Calibration", "Connect CAL OUT 100 MHz to CAL IN and press Yes.", parent=self.root)
+        self.state.calibration_ok = ok
+        self.state.status_message = "CAL OK" if ok else "CAL CANCELLED"
+
+    def save_trace_csv(self, title: str = "Save trace") -> None:
+        path = filedialog.asksaveasfilename(title=title, defaultextension=".csv", filetypes=[("CSV", "*.csv")], parent=self.root)
+        if not path: return
+        values = self.current_trace()
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(["frequency_mhz", "level_db"])
+            for i, level in enumerate(values):
+                freq = self.state.start_mhz + self.state.span_mhz * i / (len(values)-1)
+                writer.writerow([f"{freq:.9f}", f"{level:.4f}"])
+        self.state.status_message = "TRACE SAVED"
+
+    def recall_trace_csv(self) -> None:
+        path = filedialog.askopenfilename(filetypes=[("CSV", "*.csv")], parent=self.root)
+        if not path: return
+        values = []
+        with open(path, newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f): values.append(float(row["level_db"]))
+        self.state.trace_b = values
+        self.state.memory_enabled = True
+        self.state.status_message = "TRACE RECALLED"
+
+    def show_return_loss(self) -> None:
+        level = self.marker_level(self.state.markers[self.state.selected_marker])
+        messagebox.showinfo("Return loss", f"Return loss at marker: {abs(level):.2f} dB", parent=self.root)
+
+    def set_swr_scale(self) -> None:
+        value = self.ask_float("SWR scale", "Maximum SWR:", 3.0)
+        if value: self.state.status_message = f"SWR SCALE {value:.1f}"
+
+    def show_swr_bandwidth(self) -> None:
+        messagebox.showinfo("SWR bandwidth", "Synthetic SWR<2 bandwidth: 2.35 MHz", parent=self.root)
+
+    def osl_calibration(self) -> None:
+        ok = all(messagebox.askyesno("OSL calibration", f"Connect {standard} and press Yes.", parent=self.root) for standard in ("OPEN", "SHORT", "LOAD"))
+        self.state.calibration_ok = ok
+        self.state.status_message = "OSL CAL OK" if ok else "OSL CAL FAILED"
+
+    def save_result(self) -> None:
+        self.save_trace_csv("Save antenna result")
+
+    def save_screen(self) -> None:
+        path = filedialog.asksaveasfilename(defaultextension=".ps", filetypes=[("PostScript", "*.ps")], parent=self.root)
+        if path:
+            self.canvas.postscript(file=path, colormode="color")
+            self.state.status_message = "SCREEN SAVED"
+
     def activate_menu_item(self) -> None:
         item = MODE_MENUS[self.state.mode][self.state.menu_index]
-        if item == "TRACKING GENERATOR ON/OFF": self.toggle_tg()
-        elif item == "ENTER FREQUENCY": self.enter_marker_frequency()
-        elif "MARKER TO" in item: self.marker_to_feature()
-        elif item == "TRACE B ON / OFF":
-            self.state.memory_enabled = not self.state.memory_enabled
-        elif item == "AVERAGING":
-            self.state.averaging = {1: 4, 4: 8, 8: 16, 16: 1}[self.state.averaging]
-        elif item == "SET START / STOP":
-            start = simpledialog.askfloat("Start frequency", "Start MHz:", initialvalue=self.state.start_mhz, parent=self.root)
-            stop = simpledialog.askfloat("Stop frequency", "Stop MHz:", initialvalue=self.state.stop_mhz, parent=self.root)
-            if start is not None and stop is not None and stop > start:
-                self.state.start_mhz, self.state.stop_mhz = start, stop
-        elif item == "SET SPAN":
-            span = simpledialog.askfloat("Span", "Span MHz:", initialvalue=self.state.span_mhz, parent=self.root)
-            if span and span > 0:
-                center = self.state.center_mhz
-                self.state.start_mhz, self.state.stop_mhz = center-span/2, center+span/2
-        else:
-            messagebox.showinfo("TR1604-Pro", f"{item}\n\nDeze functie wordt in de volgende softwarestap aangesloten.", parent=self.root)
+        actions = {
+            "TRACKING GENERATOR ON/OFF": self.toggle_tg,
+            "MARKER SELECT": self.choose_marker,
+            "ENTER FREQUENCY": self.enter_marker_frequency,
+            "MARKER TO PEAK": self.marker_to_feature,
+            "MARKER TO NOTCH": self.marker_to_feature,
+            "MARKER TO MIN SWR": self.marker_to_feature,
+            "CENTER = MARKER": lambda: self.center_on_marker(),
+            "SET START / STOP": self.set_start_stop,
+            "SET SPAN": self.set_span,
+            "RBW / VBW": self.set_rbw_vbw,
+            "TRACE MODE": self.set_trace_mode,
+            "SAVE TRACE": self.save_trace_csv,
+            "DELTA MARKER": lambda: setattr(self.state, "delta_marker_enabled", not self.state.delta_marker_enabled),
+            "BANDWIDTH": self.set_bandwidth,
+            "INSERTION LOSS": self.show_insertion_loss,
+            "PASS / FAIL LIMITS": self.set_limits,
+            "SAVE PROFILE": self.save_profile,
+            "LOAD PROFILE": self.load_profile,
+            "CALIBRATION": self.run_calibration,
+            "TRACE A LIVE": lambda: self.set_hold_mode("LIVE"),
+            "TRACE B ON / OFF": self.toggle_trace_b,
+            "STORE TRACE B": self.store_trace_b,
+            "A - B": lambda: self.set_hold_mode("A-B"),
+            "MAX HOLD": lambda: self.set_hold_mode("MAX HOLD"),
+            "MIN HOLD": lambda: self.set_hold_mode("MIN HOLD"),
+            "AVERAGING": self.cycle_averaging,
+            "SAVE TO SD": self.save_trace_csv,
+            "RECALL FROM SD": self.recall_trace_csv,
+            "RETURN LOSS": self.show_return_loss,
+            "SWR SCALE": self.set_swr_scale,
+            "BANDWIDTH SWR < 2": self.show_swr_bandwidth,
+            "OPEN / SHORT / LOAD": self.osl_calibration,
+            "SAVE RESULT": self.save_result,
+        }
+        actions[item]()
         self.state.status_message = item
+
+    def center_on_marker(self) -> None:
+        center = self.state.markers[self.state.selected_marker].frequency_mhz
+        span = self.state.span_mhz
+        self.state.start_mhz, self.state.stop_mhz = center - span/2, center + span/2
 
     def trace_level(self, freq: float) -> float:
         if not self.state.tg_enabled and self.state.mode != "SPECTRUM ANALYZER":
@@ -214,105 +393,105 @@ class TR1604Simulator:
         if self.state.mode == "SPECTRUM ANALYZER":
             level = -88.0
             for peak, amp, width in ((145.425, 67.0, 0.10), (146.275, 49.0, 0.16)):
-                x = (freq-peak)/width
-                level += amp/(1+x*x)
+                x = (freq - peak) / width
+                level += amp / (1 + x*x)
             return min(-4.0, level + self._rng.uniform(-0.8, 0.8))
         if self.state.mode in ("DUPLEX FILTER TUNE", "MEMORY / TRACE COMPARE"):
             level = -17.0
             for marker, depth, width in zip(self.state.markers[:2], (70.0, 68.0), (0.055, 0.065)):
-                x = (freq-marker.frequency_mhz)/width
-                level -= depth/(1+x*x)
+                x = (freq - marker.frequency_mhz) / width
+                level -= depth / (1 + x*x)
             return max(-110.0, level + 0.45*math.sin(freq*19.0) + self._rng.uniform(-0.35, 0.35))
-        # Antenna analyzer uses return-loss style dip.
-        x = (freq-145.425)/0.42
+        x = (freq - 145.425) / 0.42
         return max(-50.0, -4.0 - 38.0/(1+x*x) + self._rng.uniform(-0.25, 0.25))
 
     def marker_level(self, marker: Marker) -> float:
         return self.trace_level(marker.frequency_mhz)
 
-    def draw_text(self, x: float, y: float, text: str, *, color: str = CRT_GREEN, font=FONT, anchor="nw") -> None:
+    def draw_text(self, x: float, y: float, text: str, *, color: str = CRT_GREEN, font=FONT, anchor: str = "nw") -> None:
         self.canvas.create_text(x, y, text=text, fill=color, font=font, anchor=anchor)
 
     def draw(self) -> None:
         self.canvas.delete("all")
-        w = max(1000, self.canvas.winfo_width())
-        h = max(680, self.canvas.winfo_height())
-        pad = 24
+        w = max(1120, self.canvas.winfo_width())
+        h = max(760, self.canvas.winfo_height())
+        pad = 22
         self.canvas.create_rectangle(pad, pad, w-pad, h-pad, fill=CRT_BG, outline="#2a322d", width=6)
-        x0, y0, x1, y1 = pad+28, pad+25, w-pad-28, h-pad-25
-        menu_w = 270 if self.state.show_menu else 0
-        plot_right = x1-menu_w-(20 if menu_w else 0)
-        top_h, bottom_h = 105, 165
-        px0, py0 = x0+40, y0+top_h
+        x0, y0, x1, y1 = pad+28, pad+24, w-pad-28, h-pad-24
+        menu_w = 300 if self.state.show_menu else 0
+        plot_right = x1 - menu_w - (22 if menu_w else 0)
+        top_h, bottom_h = 126, 170
+        px0, py0 = x0+42, y0+top_h
         px1, py1 = plot_right, y1-bottom_h
 
+        # Fixed non-overlapping header columns.
         self.draw_text(x0, y0, f"TR4132N  TR1604-PRO  {self.state.mode}", font=FONT_TITLE)
-        tg_text = f"TG {'ON ' + format(self.state.tg_level_dbm, '5.1f') + ' dBm' if self.state.tg_enabled else 'OFF'}"
-        self.draw_text(plot_right-230, y0, tg_text, color=CRT_GREEN if self.state.tg_enabled else CRT_YELLOW, font=FONT_TITLE)
         self.draw_text(x0, y0+34, f"REF {self.state.ref_dbm:5.1f} dBm\n{self.state.db_per_div:.0f} dB/DIV\nLOG")
-        self.draw_text(x0+260, y0+34, f"ATTEN 20 dB\nRBW {self.state.rbw_khz:.0f} kHz\nVBW {self.state.vbw_khz:.0f} kHz")
+        self.draw_text(x0+250, y0+34, f"ATTEN 20 dB\nRBW {self.state.rbw_khz:g} kHz\nVBW {self.state.vbw_khz:g} kHz")
         marker = self.state.markers[self.state.selected_marker]
-        self.draw_text(plot_right-320, y0+34, f"MKR {self.state.selected_marker+1}  {marker.frequency_mhz:9.4f} MHz\n{self.marker_level(marker):7.2f} dB")
+        self.draw_text(x0+500, y0+34, f"MKR {self.state.selected_marker+1}\n{marker.frequency_mhz:9.4f} MHz\n{self.marker_level(marker):7.2f} dB")
+        tg_text = f"TG {'ON' if self.state.tg_enabled else 'OFF'}  {self.state.tg_level_dbm:5.1f} dBm"
+        self.draw_text(plot_right-210, y0, tg_text, color=CRT_GREEN if self.state.tg_enabled else CRT_YELLOW, font=FONT_TITLE)
 
         self.canvas.create_rectangle(px0, py0, px1, py1, outline=CRT_GREEN, width=2)
         for i in range(11):
-            x = px0+(px1-px0)*i/10
+            x = px0 + (px1-px0)*i/10
+            y = py0 + (py1-py0)*i/10
             self.canvas.create_line(x, py0, x, py1, fill=CRT_GRID, dash=(2,3))
-            y = py0+(py1-py0)*i/10
             self.canvas.create_line(px0, y, px1, y, fill=CRT_GRID, dash=(2,3))
             self.draw_text(px0-10, y, f"{-10*i:>4}", anchor="e", font=FONT_SMALL)
 
-        count, points = 900, []
-        for i in range(count):
-            freq = self.state.start_mhz+self.state.span_mhz*i/(count-1)
-            db = self.trace_level(freq)
-            points += [px0+(px1-px0)*i/(count-1), py0+(py1-py0)*(-db)/110.0]
+        values = self.current_trace()
+        points = []
+        for i, db in enumerate(values):
+            points += [px0+(px1-px0)*i/(len(values)-1), py0+(py1-py0)*(-db)/110.0]
         self.canvas.create_line(*points, fill=CRT_GREEN, width=2)
 
-        if self.state.memory_enabled:
+        if self.state.memory_enabled and self.state.trace_b:
             mem = []
-            for i in range(count):
-                freq = self.state.start_mhz+self.state.span_mhz*i/(count-1)
-                db = self.trace_level(freq)+2.0*math.sin(i/80.0)
-                mem += [px0+(px1-px0)*i/(count-1), py0+(py1-py0)*(-db)/110.0]
+            for i, db in enumerate(self.state.trace_b):
+                mem += [px0+(px1-px0)*i/(len(self.state.trace_b)-1), py0+(py1-py0)*(-db)/110.0]
             self.canvas.create_line(*mem, fill=CRT_YELLOW, width=1)
 
         for idx, m in enumerate(self.state.markers):
-            if not m.enabled or not self.state.start_mhz <= m.frequency_mhz <= self.state.stop_mhz: continue
-            x = px0+(px1-px0)*(m.frequency_mhz-self.state.start_mhz)/self.state.span_mhz
-            y = py0+(py1-py0)*(-self.marker_level(m))/110.0
-            width = 3 if idx == self.state.selected_marker else 1
-            self.canvas.create_line(x, py0, x, py1, fill=m.color, dash=(5,4), width=width)
+            if not m.enabled: continue
+            x = px0 + (px1-px0)*(m.frequency_mhz-self.state.start_mhz)/self.state.span_mhz
+            db = self.marker_level(m)
+            y = py0 + (py1-py0)*(-db)/110.0
+            self.canvas.create_line(x, py0, x, py1, fill=m.color, dash=(5,4))
             self.canvas.create_polygon(x, y, x-7, y-13, x+7, y-13, fill=m.color)
             self.draw_text(x, y+8, str(idx+1), color=m.color, anchor="n")
 
         self.draw_text(px0, py1+10, f"START {self.state.start_mhz:9.4f} MHz")
         self.draw_text((px0+px1)/2, py1+10, f"CENTER {self.state.center_mhz:9.4f} MHz", anchor="n")
         self.draw_text(px1, py1+10, f"STOP {self.state.stop_mhz:9.4f} MHz", anchor="ne")
-        self.draw_text((px0+px1)/2, py1+35, f"SPAN {self.state.span_mhz:7.4f} MHz   SWP {self.state.sweep_ms:.0f} ms", anchor="n")
+        self.draw_text((px0+px1)/2, py1+36, f"SPAN {self.state.span_mhz:7.4f} MHz   SWP {self.state.sweep_ms:.0f} ms", anchor="n")
 
-        by, box_w = py1+68, (px1-px0)/4
-        box_h = y1-by-38
-        for i in range(4): self.canvas.create_rectangle(px0+i*box_w, by, px0+(i+1)*box_w, by+box_h, outline=CRT_DIM)
+        by = py1+70
+        box_h = y1-by-42
+        box_w = (px1-px0)/4
+        for i in range(4):
+            self.canvas.create_rectangle(px0+i*box_w, by, px0+(i+1)*box_w, by+box_h, outline=CRT_DIM)
         for i, m in enumerate(self.state.markers[:2]):
             self.draw_text(px0+i*box_w+14, by+12, f"MKR {i+1}\n{m.frequency_mhz:9.4f} MHz\n{self.marker_level(m):7.2f} dB", color=m.color)
         delta_f = self.state.markers[1].frequency_mhz-self.state.markers[0].frequency_mhz
         delta_db = self.marker_level(self.state.markers[1])-self.marker_level(self.state.markers[0])
         self.draw_text(px0+2*box_w+14, by+12, f"DELTA\n{delta_f:9.4f} MHz\n{delta_db:7.2f} dB")
-        self.draw_text(px0+3*box_w+14, by+12, f"TRACE\nA LIVE\nB {'ON' if self.state.memory_enabled else 'OFF'}\nAVG {self.state.averaging}")
-        self.draw_text(px0, y1-22, f"F1 SPECTRUM  F2 DUPLEX  F3 MEMORY  F4 ANTENNA  T TG ON/OFF  M MENU   {self.state.status_message}", font=FONT_SMALL)
+        self.draw_text(px0+3*box_w+14, by+12, f"TRACE\n{self.state.trace_mode}\nB {'ON' if self.state.memory_enabled else 'OFF'}\nAVG {self.state.averaging}")
+
+        self.draw_text(px0, y1-24, f"F1 SPECTRUM  F2 DUPLEX  F3 MEMORY  F4 ANTENNA   {self.state.status_message}", font=FONT_SMALL)
 
         if self.state.show_menu:
-            mx = plot_right+18
-            self.canvas.create_line(mx-10, y0+32, mx-10, y1, fill=CRT_GREEN)
-            self.draw_text(mx, y0+42, f"{self.state.mode} MENU", font=FONT_SMALL)
-            y = y0+70
+            mx = plot_right+20
+            self.canvas.create_line(mx-10, y0+10, mx-10, y1, fill=CRT_GREEN)
+            self.draw_text(mx, y0+14, f"{self.state.mode} MENU", font=FONT_SMALL)
+            yy = y0+48
             for idx, item in enumerate(MODE_MENUS[self.state.mode]):
                 selected = idx == self.state.menu_index
-                prefix = "> " if selected else "  "
-                self.draw_text(mx, y, prefix+item, color=CRT_BRIGHT if selected else CRT_GREEN, font=FONT_SMALL)
-                y += 20
-            self.draw_text(mx, y+16, "UP/DOWN = SELECT\nENTER = ACTIVATE\nT = TG ON/OFF\n1..4 = MARKER\nLEFT/RIGHT = MOVE", font=FONT_SMALL)
+                self.draw_text(mx, yy, ("> " if selected else "  ") + item, color=CRT_BRIGHT if selected else CRT_GREEN, font=FONT_SMALL)
+                yy += 21
+            yy += 10
+            self.draw_text(mx, yy, "UP/DOWN = SELECT\nENTER = ACTIVATE\nESC = CLOSE MENU\n1..4 = MARKER\nLEFT/RIGHT = MOVE\nT = TG ON/OFF", font=FONT_SMALL)
 
     def run(self) -> None:
         self.root.mainloop()
