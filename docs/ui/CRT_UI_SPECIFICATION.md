@@ -42,20 +42,41 @@ Main trace view with:
 - center/start/stop/span;
 - sweep time;
 - TG state and level;
-- one or two markers;
+- configurable markers;
 - right-side spectrum menu.
 
-### 3. Marker readout
+### 3. Marker system
 
-Supports:
+Markers are fully user-configurable and are never permanently tied to fixed frequencies.
 
-- marker 1 and marker 2;
+Required functions:
+
+- at least four independent normal markers, with architecture prepared for ten;
+- per-marker enable/disable;
+- direct numeric frequency entry;
+- movement with cursor keys, encoder or configurable frequency step;
 - marker-to-peak;
-- next peak;
+- next peak left/right;
 - marker-to-center;
-- delta frequency and level;
+- marker-to-start and marker-to-stop;
+- marker-to-minimum/notch;
+- automatic peak or notch tracking;
+- normal, delta and fixed-reference marker modes;
+- selectable active marker;
+- marker frequency, level and trace assignment;
 - marker table;
-- automatic peak tracking.
+- marker labels and optional user names;
+- marker presets stored per measurement profile.
+
+Delta mode uses one marker as reference and reports frequency and level difference for another marker. Moving the reference marker updates all associated delta readings.
+
+Numeric entry examples:
+
+- `430.3625 MHz`
+- `431.9625 MHz`
+- `1.6000 MHz` delta target
+
+These values are examples and may be saved as a duplex-filter preset, but remain editable.
 
 ### 4. Duplex filter tune mode
 
@@ -63,10 +84,9 @@ This is a primary application mode.
 
 Required fields:
 
-- marker 1 at `430.3625 MHz`;
-- marker 2 at `431.9625 MHz`;
-- delta `1.6000 MHz`;
-- notch depth at both frequencies;
+- two or more user-configurable notch markers;
+- notch depth at every enabled notch marker;
+- delta frequency between selected markers;
 - passband insertion loss;
 - bandwidth and Q where applicable;
 - calibration state;
@@ -74,13 +94,19 @@ Required fields:
 - memory/reference state;
 - alignment PASS/FAIL against user-defined limits.
 
-The displayed response uses deep rejection notches at the specified frequencies. This mode is intended for tuning duplex cavities and duplex filters where the selected frequencies must be strongly attenuated.
+Default example preset:
+
+- marker 1: `430.3625 MHz`;
+- marker 2: `431.9625 MHz`;
+- expected delta: `1.6000 MHz`.
+
+The user can edit, replace and save these frequencies for other duplexers, cavity filters and channel spacings. Presets must store marker frequencies, limits, span, center, RBW, TG level and trace settings.
 
 ### 5. Zoom / notch detail
 
-A narrow-span view around one selected notch with:
+A narrow-span view around one selected marker or notch with:
 
-- notch center;
+- marker/notch center;
 - depth;
 - -3 dB or user-selected bandwidth;
 - Q;
@@ -120,7 +146,7 @@ Rev A scalar functions:
 - SWR;
 - resonance;
 - bandwidth;
-- marker readout;
+- configurable marker readout;
 - reference calibration.
 
 Rev B vector functions:
@@ -138,6 +164,7 @@ Includes:
 - amplitude setup;
 - sweep setup;
 - marker setup;
+- marker preset management;
 - trace/memory setup;
 - disk/USB;
 - calibration;
@@ -163,7 +190,7 @@ Approximately 75–82% of the usable screen width in normal modes.
 
 ### Right information column
 
-Approximately 18–25% of the usable screen width. It contains menu items, marker readout and mode-specific values.
+Approximately 18–25% of the usable screen width. It contains menu items, active-marker readout and mode-specific values.
 
 ### Bottom status bar
 
@@ -181,12 +208,27 @@ Shows active mode shortcuts and critical state:
 
 Primary control is a USB keyboard. The firmware must support:
 
-- cursor keys;
-- numeric entry;
+- cursor keys for marker movement;
+- numeric frequency entry;
 - Enter and Escape;
 - function keys;
+- direct marker selection shortcuts;
+- configurable marker step size;
 - dedicated shortcuts for marker, memory, TG and save;
 - optional encoder and front-panel keys later.
+
+Suggested shortcuts:
+
+- `M`: marker menu;
+- `1`–`9`: select marker;
+- arrow left/right: move active marker;
+- Shift + arrow: fine movement;
+- Page Up/Down: coarse movement;
+- `P`: marker to peak;
+- `N`: marker to notch/minimum;
+- `D`: delta mode;
+- `C`: marker to center;
+- Enter: numeric marker frequency entry.
 
 ## Rendering constraints
 
@@ -205,5 +247,6 @@ The implementation is accepted when:
 1. All nine approved screen types are available.
 2. The real CRT resembles the approved slideshow at normal viewing distance.
 3. Menus remain readable without obscuring the measurement.
-4. Duplex-filter mode clearly reports the rejection at 430.3625 and 431.9625 MHz.
-5. A hardware or firmware fault returns the analyzer to original bypass operation.
+4. Marker frequencies are freely editable and can be saved in presets.
+5. Duplex-filter mode supports arbitrary user-entered notch frequencies and limits.
+6. A hardware or firmware fault returns the analyzer to original bypass operation.
