@@ -17,7 +17,6 @@ CRT_DIM = "#1d7631"
 CRT_GRID = "#174d25"
 CRT_YELLOW = "#ffe43b"
 CRT_CYAN = "#41e9ff"
-CRT_RED = "#ff6d62"
 FONT = ("Consolas", 12)
 FONT_SMALL = ("Consolas", 10)
 FONT_TITLE = ("Consolas", 14, "bold")
@@ -77,9 +76,13 @@ class TR1604Simulator:
         self.root.after(50, self.draw)
 
     def on_key(self, event: tk.Event) -> None:
-        key = event.keysym
-        ch = event.char.lower() if event.char else ""
-        if ch in "1234":
+        key = event.keysym or ""
+        raw_char = event.char if isinstance(event.char, str) else ""
+        ch = raw_char.lower()
+
+        # Python 3.14/Tk can report an empty event.char for function, modifier and
+        # navigation keys. Only parse marker numbers when a real digit was received.
+        if ch and ch in "1234":
             self.state.selected_marker = int(ch) - 1
             self.state.markers[self.state.selected_marker].enabled = True
         elif key in ("Left", "Right"):
@@ -90,12 +93,23 @@ class TR1604Simulator:
             if event.state & 0x0004:  # Ctrl
                 step *= 10.0
             marker = self.state.markers[self.state.selected_marker]
-            marker.frequency_mhz = min(self.state.stop_mhz, max(self.state.start_mhz, marker.frequency_mhz + direction * step))
+            marker.frequency_mhz = min(
+                self.state.stop_mhz,
+                max(self.state.start_mhz, marker.frequency_mhz + direction * step),
+            )
         elif key == "Return":
             marker = self.state.markers[self.state.selected_marker]
-            value = simpledialog.askfloat("Marker frequency", "Frequency in MHz:", initialvalue=marker.frequency_mhz, parent=self.root)
+            value = simpledialog.askfloat(
+                "Marker frequency",
+                "Frequency in MHz:",
+                initialvalue=marker.frequency_mhz,
+                parent=self.root,
+            )
             if value is not None:
-                marker.frequency_mhz = min(self.state.stop_mhz, max(self.state.start_mhz, value))
+                marker.frequency_mhz = min(
+                    self.state.stop_mhz,
+                    max(self.state.start_mhz, value),
+                )
         elif ch == "n":
             marker = self.state.markers[self.state.selected_marker]
             target = 430.3625 if marker.frequency_mhz < self.state.center_mhz else 431.9625
@@ -123,10 +137,11 @@ class TR1604Simulator:
         self.draw()
 
     def trace_level(self, freq: float) -> float:
-        # Synthetic duplex-filter rejection response: two adjustable notches.
         baseline = -17.0
         level = baseline
-        for marker, depth, width in zip(self.state.markers[:2], (70.0, 68.0), (0.055, 0.065)):
+        for marker, depth, width in zip(
+            self.state.markers[:2], (70.0, 68.0), (0.055, 0.065)
+        ):
             x = (freq - marker.frequency_mhz) / width
             level -= depth / (1.0 + x * x)
         ripple = 0.45 * math.sin(freq * 19.0) + 0.22 * math.sin(freq * 47.0)
@@ -160,10 +175,11 @@ class TR1604Simulator:
         left_status = (
             f"REF {self.state.ref_dbm:5.1f} dBm\n"
             f"{self.state.db_per_div:.0f} dB/DIV\n"
-            f"LOG"
+            "LOG"
         )
         mid_status = (
-            f"ATTEN 20 dB\nRBW {self.state.rbw_khz:.0f} kHz\n"
+            "ATTEN 20 dB\n"
+            f"RBW {self.state.rbw_khz:.0f} kHz\n"
             f"VBW {self.state.vbw_khz:.0f} kHz"
         )
         self.draw_text(x0, y0+34, left_status)
@@ -171,10 +187,14 @@ class TR1604Simulator:
 
         active = [m for m in self.state.markers if m.enabled]
         if active:
-            m = active[0]
-            self.draw_text(plot_right-315, y0+34, f"MKR {self.state.selected_marker+1} {m.frequency_mhz:9.4f} MHz\n{self.marker_level(m):7.2f} dBm")
+            marker = self.state.markers[self.state.selected_marker]
+            self.draw_text(
+                plot_right-315,
+                y0+34,
+                f"MKR {self.state.selected_marker+1} {marker.frequency_mhz:9.4f} MHz\n"
+                f"{self.marker_level(marker):7.2f} dBm",
+            )
 
-        # Plot grid.
         self.canvas.create_rectangle(px0, py0, px1, py1, outline=CRT_GREEN, width=2)
         for i in range(11):
             x = px0 + (px1-px0)*i/10
@@ -187,8 +207,8 @@ class TR1604Simulator:
         points = []
         count = 900
         for i in range(count):
-            f = self.state.start_mhz + self.state.span_mhz * i/(count-1)
-            db = self.trace_level(f)
+            freq = self.state.start_mhz + self.state.span_mhz * i/(count-1)
+            db = self.trace_level(freq)
             x = px0 + (px1-px0)*i/(count-1)
             y = py0 + (py1-py0)*(-db)/110.0
             points.extend((x,y))
@@ -197,8 +217,8 @@ class TR1604Simulator:
         if self.state.memory_enabled:
             mem = []
             for i in range(count):
-                f = self.state.start_mhz + self.state.span_mhz*i/(count-1)
-                db = self.trace_level(f) + 2.0*math.sin(i/80.0)
+                freq = self.state.start_mhz + self.state.span_mhz*i/(count-1)
+                db = self.trace_level(freq) + 2.0*math.sin(i/80.0)
                 x = px0 + (px1-px0)*i/(count-1)
                 y = py0 + (py1-py0)*(-db)/110.0
                 mem.extend((x,y))
@@ -219,7 +239,6 @@ class TR1604Simulator:
         self.draw_text(px1, py1+10, f"STOP {self.state.stop_mhz:9.4f} MHz", anchor="ne")
         self.draw_text((px0+px1)/2, py1+35, f"SPAN {self.state.span_mhz:7.4f} MHz   SWP {self.state.sweep_ms:.0f} ms", anchor="n")
 
-        # Bottom measurement boxes.
         by = py1 + 68
         box_h = y1-by-38
         box_w = (px1-px0)/4
@@ -227,7 +246,12 @@ class TR1604Simulator:
             self.canvas.create_rectangle(px0+i*box_w, by, px0+(i+1)*box_w, by+box_h, outline=CRT_DIM)
         for i, marker in enumerate(self.state.markers[:2]):
             level = self.marker_level(marker)
-            self.draw_text(px0+i*box_w+14, by+12, f"MKR {i+1}\n{marker.frequency_mhz:9.4f} MHz\n{level:7.2f} dBm", color=marker.color)
+            self.draw_text(
+                px0+i*box_w+14,
+                by+12,
+                f"MKR {i+1}\n{marker.frequency_mhz:9.4f} MHz\n{level:7.2f} dBm",
+                color=marker.color,
+            )
         delta_f = self.state.markers[1].frequency_mhz-self.state.markers[0].frequency_mhz
         delta_db = self.marker_level(self.state.markers[1])-self.marker_level(self.state.markers[0])
         self.draw_text(px0+2*box_w+14, by+12, f"DELTA\n{delta_f:9.4f} MHz\n{delta_db:7.2f} dB")
