@@ -1,23 +1,34 @@
 """TR1604-Pro Desktop Display V5.
 
-V5 promotes trace memory to a real reference overlay:
+V5 reference UI features:
 - Trace A: live measurement (green)
 - Trace B: stored memory/reference (yellow dashed)
-- The reference is retained while the live trace continues changing.
-- Spectrum, Duplex and Antenna modes can store/toggle the reference directly.
-- USB remote support and the V3 startup scene remain available through V4.
+- Four independently switchable markers, all visible in the bottom readout
+- Spectrum, Duplex and Antenna modes can store/toggle the reference directly
+- USB remote support and slideshow startup inherited from V4/V3
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from tr1604_sim_v2 import MENUS, GREEN, YELLOW, DIM, SMALL, TITLE
+from tr1604_sim_v2 import MENUS, GREEN, YELLOW, CYAN, BRIGHT, DIM, BG, SMALL, TITLE
 from tr1604_sim_v4 import Simulator as V4Simulator
 
-FW_VERSION = "3.2.0"
-BUILD_ID = "desktop-v5-001"
+FW_VERSION = "3.2.1"
+BUILD_ID = "desktop-v5-002"
 
-# Add direct memory controls to the principal measurement screens.
+# Direct memory and marker controls in the principal measurement screens.
+for _screen in (
+    "SPECTRUM ANALYZER",
+    "DUPLEX FILTER TUNE",
+    "ANTENNA ANALYZER",
+    "MEMORY / TRACE COMPARE",
+):
+    _menu = MENUS[_screen]
+    # Place marker toggle directly after marker selection where possible.
+    if "MARKER SELECT" in _menu and "MARKER ON/OFF" not in _menu:
+        _menu.insert(_menu.index("MARKER SELECT") + 1, "MARKER ON/OFF")
+
 for _screen in ("SPECTRUM ANALYZER", "DUPLEX FILTER TUNE", "ANTENNA ANALYZER"):
     _menu = MENUS[_screen]
     insert_at = max(0, len(_menu) - 1)
@@ -43,6 +54,36 @@ class Simulator(V4Simulator):
         super().__init__()
         self.root.title("TR1604-Pro Desktop Display V5")
 
+    # ------------------------------------------------------------------
+    # Keyboard / markers
+    # ------------------------------------------------------------------
+    def key(self, event) -> None:
+        """V5 marker behaviour: 1..4 select only; X toggles selected marker."""
+        if self.startup_active or self.s.dialog:
+            super().key(event)
+            return
+
+        key = event.keysym or ""
+        ch = event.char.lower() if isinstance(event.char, str) and event.char else ""
+        if ch in "1234":
+            self.s.selected_marker = int(ch) - 1
+            self.s.status = f"MARKER {ch} SELECTED - {'ON' if self.s.markers[self.s.selected_marker].enabled else 'OFF'}"
+            self.draw()
+            return
+        if ch == "x":
+            self.toggle_selected_marker()
+            self.draw()
+            return
+        super().key(event)
+
+    def toggle_selected_marker(self) -> None:
+        marker = self.s.markers[self.s.selected_marker]
+        marker.enabled = not marker.enabled
+        self.s.status = f"MARKER {self.s.selected_marker + 1} {'ON' if marker.enabled else 'OFF'}"
+
+    # ------------------------------------------------------------------
+    # Memory trace
+    # ------------------------------------------------------------------
     def _capture_memory_values(self, n: int = 700) -> tuple[list[float], str]:
         if self.s.screen == "ANTENNA ANALYZER":
             vals = [
@@ -62,14 +103,12 @@ class Simulator(V4Simulator):
             source_screen=self.s.screen,
             enabled=True,
         )
-        # Keep legacy Trace B state synchronized for Memory / Trace Compare mode.
         self.s.trace_b = list(values)
         self.s.trace_b_on = True
         self.s.status = f"MEMORY B STORED - {self.s.screen}"
 
     def toggle_memory_overlay(self) -> None:
         if not self.memory.values and self.s.trace_b:
-            # Promote an older Trace B into the V5 overlay format.
             self.memory = MemoryTrace(
                 values=list(self.s.trace_b),
                 start_mhz=self.s.start_mhz,
@@ -85,6 +124,9 @@ class Simulator(V4Simulator):
 
     def activate(self) -> None:
         item = MENUS[self.s.screen][self.s.menu_index]
+        if item == "MARKER ON/OFF":
+            self.toggle_selected_marker()
+            return
         if item in ("STORE MEMORY TRACE", "STORE TRACE B"):
             self.store_memory_trace()
             return
@@ -97,9 +139,9 @@ class Simulator(V4Simulator):
                 "\n".join((
                     f"Firmware {FW_VERSION}",
                     "Digital Memory / Trace Overlay",
+                    "4 Marker Measurement",
                     "Tracking Generator",
-                    "CRT Overlay",
-                    "USB Desktop Display",
+                    "CRT Overlay / USB Desktop",
                     "",
                     "R. Markesteijn",
                     f"Build {BUILD_ID}",
@@ -109,6 +151,7 @@ class Simulator(V4Simulator):
         if item == "SERVICE INFORMATION":
             state = "CONNECTED" if self.usb.snapshot.connected else "DISCONNECTED"
             mem = "ON" if self.memory.enabled else "OFF"
+            active_markers = sum(1 for m in self.s.markers if m.enabled)
             self.message(
                 "SERVICE INFORMATION",
                 "\n".join((
@@ -120,6 +163,7 @@ class Simulator(V4Simulator):
                     "TG PLL         LOCKED      OK",
                     "SD CARD        READY       OK",
                     "BYPASS         SAFE        OK",
+                    f"MARKERS        {active_markers}/4 ON",
                     f"MEMORY B       {mem}",
                     f"DATA SOURCE    {self.data_source}",
                     f"USB {self.usb_port:<7} {state}",
@@ -149,7 +193,6 @@ class Simulator(V4Simulator):
         if not self.memory.enabled or not self.memory.values:
             return
 
-        # Recreate the V2/V4 measurement plot geometry exactly.
         mw = 290 if self.s.menu_open else 0
         pr = x1 - mw - (18 if mw else 0)
         px0 = x0 + 45
@@ -158,8 +201,6 @@ class Simulator(V4Simulator):
         py1 = y1 - 175
         n = 700
         values = self._resample(self.memory.values, n)
-
-        # Only compare like-for-like data. A dB trace is not meaningful on an SWR axis.
         current_kind = "SWR" if self.s.screen == "ANTENNA ANALYZER" else "DB"
         if self.memory.kind != current_kind:
             self.text(px0 + 12, py0 + 10, "MEM B: INCOMPATIBLE SCALE", color=YELLOW, font=SMALL)
@@ -176,55 +217,74 @@ class Simulator(V4Simulator):
                 y = py0 + (py1 - py0) * ((-value) / 110.0)
             points.extend((x, y))
 
-        # Dashed yellow reference makes the live green trace easy to compare.
-        if len(points) >= 4:
-            # Tkinter does not support dash on a smoothed arbitrary polyline equally on
-            # all versions, so draw alternating short segments explicitly.
-            for i in range(0, n - 1, 4):
-                j = min(i + 2, n - 1)
-                a = i * 2
-                b = j * 2
-                self.c.create_line(
-                    points[a], points[a + 1], points[b], points[b + 1],
-                    fill=YELLOW, width=2,
-                )
+        for i in range(0, n - 1, 4):
+            j = min(i + 2, n - 1)
+            a = i * 2
+            b = j * 2
+            self.c.create_line(
+                points[a], points[a + 1], points[b], points[b + 1],
+                fill=YELLOW, width=2,
+            )
 
+        self.text(px1 - 12, py0 + 10, "MEM B", color=YELLOW, font=TITLE, anchor="ne")
         self.text(
-            px1 - 12,
-            py0 + 10,
-            "MEM B",
-            color=YELLOW,
-            font=TITLE,
-            anchor="ne",
-        )
-        self.text(
-            px1 - 12,
-            py0 + 34,
+            px1 - 12, py0 + 34,
             f"{self.memory.start_mhz:.4f}-{self.memory.stop_mhz:.4f} MHz",
-            color=YELLOW,
-            font=SMALL,
-            anchor="ne",
+            color=YELLOW, font=SMALL, anchor="ne",
         )
+
+    # ------------------------------------------------------------------
+    # Four-marker bottom readout
+    # ------------------------------------------------------------------
+    def _draw_four_marker_readout(self, x0, y0, x1, y1) -> None:
+        mw = 290 if self.s.menu_open else 0
+        pr = x1 - mw - (18 if mw else 0)
+        px0 = x0 + 45
+        px1 = pr
+        py1 = y1 - 175
+        by = py1 + 60
+        bottom = y1 - 58
+
+        # Cover the legacy M1/M2/Delta/TG boxes without touching the F-key line.
+        self.c.create_rectangle(px0 - 2, by - 2, px1 + 2, bottom + 2, fill=BG, outline=BG)
+        bw = (px1 - px0) / 4.0
+        colors = (YELLOW, CYAN, GREEN, BRIGHT)
+
+        for i, marker in enumerate(self.s.markers[:4]):
+            xa = px0 + i * bw
+            xb = px0 + (i + 1) * bw
+            selected = i == self.s.selected_marker
+            outline = BRIGHT if selected else DIM
+            width = 2 if selected else 1
+            self.c.create_rectangle(xa, by, xb, bottom, outline=outline, width=width)
+
+            if marker.enabled:
+                if self.s.screen == "ANTENNA ANALYZER":
+                    value_text = f"SWR {self.swr(marker.frequency_mhz):.2f}"
+                else:
+                    value_text = f"{self.level(marker.frequency_mhz):.2f} dB"
+                body = f"MKR {i + 1}  ON\n{marker.frequency_mhz:.4f} MHz\n{value_text}"
+                color = colors[i]
+            else:
+                body = f"MKR {i + 1}  OFF\n---.---- MHz\n---"
+                color = DIM
+
+            if selected:
+                body = "> " + body
+            self.text(xa + 10, by + 9, body, color=color, font=SMALL)
 
     def draw_measurement(self, x0, y0, x1, y1) -> None:
-        # Base renderer draws live Trace A, markers, menus and USB state.
         super().draw_measurement(x0, y0, x1, y1)
-        # Draw memory last so the yellow reference remains clearly visible.
         self._draw_memory_overlay(x0, y0, x1, y1)
+        self._draw_four_marker_readout(x0, y0, x1, y1)
 
-        # Permanent status strip for reference comparison.
         mem_state = "MEM B ON" if self.memory.enabled else "MEM B OFF"
         mem_color = YELLOW if self.memory.enabled else DIM
+        active = sum(1 for m in self.s.markers if m.enabled)
         self.text(x0 + 8, y1 - 43, "TRACE A LIVE", color=GREEN, font=SMALL)
         self.text(x0 + 125, y1 - 43, mem_state, color=mem_color, font=SMALL)
-        if self.memory.values:
-            self.text(
-                x0 + 235,
-                y1 - 43,
-                f"REF: {self.memory.source_screen}",
-                color=mem_color,
-                font=SMALL,
-            )
+        self.text(x0 + 235, y1 - 43, f"MARKERS {active}/4", color=GREEN, font=SMALL)
+        self.text(x0 + 335, y1 - 43, "1-4 SELECT  X ON/OFF", color=DIM, font=SMALL)
 
 
 if __name__ == "__main__":
