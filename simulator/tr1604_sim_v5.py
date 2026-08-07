@@ -14,8 +14,8 @@ from dataclasses import dataclass, field
 from tr1604_sim_v2 import MENUS, GREEN, YELLOW, CYAN, BRIGHT, DIM, BG, SMALL, TITLE
 from tr1604_sim_v4 import Simulator as V4Simulator
 
-FW_VERSION = "3.2.1"
-BUILD_ID = "desktop-v5-002"
+FW_VERSION = "3.2.2"
+BUILD_ID = "desktop-v5-003"
 
 # Direct memory and marker controls in the principal measurement screens.
 for _screen in (
@@ -25,7 +25,6 @@ for _screen in (
     "MEMORY / TRACE COMPARE",
 ):
     _menu = MENUS[_screen]
-    # Place marker toggle directly after marker selection where possible.
     if "MARKER SELECT" in _menu and "MARKER ON/OFF" not in _menu:
         _menu.insert(_menu.index("MARKER SELECT") + 1, "MARKER ON/OFF")
 
@@ -63,9 +62,10 @@ class Simulator(V4Simulator):
             super().key(event)
             return
 
-        key = event.keysym or ""
         ch = event.char.lower() if isinstance(event.char, str) and event.char else ""
-        if ch in "1234":
+        # Important for Python/Tk 3.14: '' in '1234' is True, so explicitly
+        # require a non-empty character before converting to int.
+        if ch and ch in "1234":
             self.s.selected_marker = int(ch) - 1
             self.s.status = f"MARKER {ch} SELECTED - {'ON' if self.s.markers[self.s.selected_marker].enabled else 'OFF'}"
             self.draw()
@@ -86,10 +86,7 @@ class Simulator(V4Simulator):
     # ------------------------------------------------------------------
     def _capture_memory_values(self, n: int = 700) -> tuple[list[float], str]:
         if self.s.screen == "ANTENNA ANALYZER":
-            vals = [
-                self.swr(self.s.start_mhz + self.s.span * i / (n - 1))
-                for i in range(n)
-            ]
+            vals = [self.swr(self.s.start_mhz + self.s.span * i / (n - 1)) for i in range(n)]
             return vals, "SWR"
         return self.trace(n), "DB"
 
@@ -221,17 +218,10 @@ class Simulator(V4Simulator):
             j = min(i + 2, n - 1)
             a = i * 2
             b = j * 2
-            self.c.create_line(
-                points[a], points[a + 1], points[b], points[b + 1],
-                fill=YELLOW, width=2,
-            )
+            self.c.create_line(points[a], points[a + 1], points[b], points[b + 1], fill=YELLOW, width=2)
 
         self.text(px1 - 12, py0 + 10, "MEM B", color=YELLOW, font=TITLE, anchor="ne")
-        self.text(
-            px1 - 12, py0 + 34,
-            f"{self.memory.start_mhz:.4f}-{self.memory.stop_mhz:.4f} MHz",
-            color=YELLOW, font=SMALL, anchor="ne",
-        )
+        self.text(px1 - 12, py0 + 34, f"{self.memory.start_mhz:.4f}-{self.memory.stop_mhz:.4f} MHz", color=YELLOW, font=SMALL, anchor="ne")
 
     # ------------------------------------------------------------------
     # Four-marker bottom readout
@@ -242,10 +232,12 @@ class Simulator(V4Simulator):
         px0 = x0 + 45
         px1 = pr
         py1 = y1 - 175
-        by = py1 + 60
-        bottom = y1 - 58
 
-        # Cover the legacy M1/M2/Delta/TG boxes without touching the F-key line.
+        # Keep the four marker blocks clearly above both bottom text rows.
+        # Plot labels live just below py1; status is at y1-61 and F-keys at y1-22.
+        by = py1 + 50
+        bottom = y1 - 88
+
         self.c.create_rectangle(px0 - 2, by - 2, px1 + 2, bottom + 2, fill=BG, outline=BG)
         bw = (px1 - px0) / 4.0
         colors = (YELLOW, CYAN, GREEN, BRIGHT)
@@ -271,7 +263,7 @@ class Simulator(V4Simulator):
 
             if selected:
                 body = "> " + body
-            self.text(xa + 10, by + 9, body, color=color, font=SMALL)
+            self.text(xa + 10, by + 8, body, color=color, font=SMALL)
 
     def draw_measurement(self, x0, y0, x1, y1) -> None:
         super().draw_measurement(x0, y0, x1, y1)
@@ -281,10 +273,11 @@ class Simulator(V4Simulator):
         mem_state = "MEM B ON" if self.memory.enabled else "MEM B OFF"
         mem_color = YELLOW if self.memory.enabled else DIM
         active = sum(1 for m in self.s.markers if m.enabled)
-        self.text(x0 + 8, y1 - 43, "TRACE A LIVE", color=GREEN, font=SMALL)
-        self.text(x0 + 125, y1 - 43, mem_state, color=mem_color, font=SMALL)
-        self.text(x0 + 235, y1 - 43, f"MARKERS {active}/4", color=GREEN, font=SMALL)
-        self.text(x0 + 335, y1 - 43, "1-4 SELECT  X ON/OFF", color=DIM, font=SMALL)
+        status_y = y1 - 61
+        self.text(x0 + 8, status_y, "TRACE A LIVE", color=GREEN, font=SMALL)
+        self.text(x0 + 125, status_y, mem_state, color=mem_color, font=SMALL)
+        self.text(x0 + 235, status_y, f"MARKERS {active}/4", color=GREEN, font=SMALL)
+        self.text(x0 + 335, status_y, "1-4 SELECT  X ON/OFF", color=DIM, font=SMALL)
 
 
 if __name__ == "__main__":
