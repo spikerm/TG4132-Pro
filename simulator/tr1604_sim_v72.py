@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import time
 
-from tr1604_sim_v71 import App as V71App, MENUS, FW as V71_FW, G, BR, D, Y, C, SM
+from tr1604_sim_v71 import App as V71App, MENUS, G, BR, D, Y, C, SM
 from tr1604_sim_v7 import GRID, FN, TI
 
-FW = "5.2.0"
-BUILD = "desktop-v7.2-001"
+FW = "5.2.1"
+BUILD = "desktop-v7.2-002"
 BG = "#020b05"
 MENU_WIDTH = 300
+MENU_ROWS = 12
 
 
 class App(V71App):
@@ -16,15 +17,49 @@ class App(V71App):
 
     V7.2 keeps the V7.1 measurement/trace engine but gives every visual module
     its own fixed rectangle: header, measurement bar, graph, marker bank,
-    primary status, secondary status and softkeys.  No module is allowed to
-    draw in another module's area, which removes the footer overlap seen in
-    V7.1 and mirrors the layout planned for the STM32 CRT firmware.
+    primary status, secondary status and softkeys. No module is allowed to
+    draw in another module's area.
+
+    V7.2.1 adds a professional paged context menu with a hard limit of
+    12 visible function rows. The full menu remains navigable with Up/Down;
+    the viewport follows the selected item and shows MORE indicators when
+    functions exist outside the visible window.
     """
 
     def __init__(self):
         super().__init__()
         self.root.title("TR1604-Pro Desktop Display V7.2")
         self.grid_brightness = 0.55
+        self.menu_first = 0
+
+    # ------------------------------------------------------------------
+    # Menu viewport
+    # ------------------------------------------------------------------
+    def _sync_menu_view(self):
+        items = MENUS[self.s.screen]
+        count = len(items)
+        if count <= MENU_ROWS:
+            self.menu_first = 0
+            return
+        selected = max(0, min(self.s.menu, count - 1))
+        if selected < self.menu_first:
+            self.menu_first = selected
+        elif selected >= self.menu_first + MENU_ROWS:
+            self.menu_first = selected - MENU_ROWS + 1
+        self.menu_first = max(0, min(self.menu_first, count - MENU_ROWS))
+
+    def key(self, event):
+        old_screen = self.s.screen
+        old_menu = self.s.menu
+        super().key(event)
+        if self.s.screen != old_screen:
+            self.menu_first = 0
+        if self.s.menu != old_menu or self.s.screen != old_screen:
+            self._sync_menu_view()
+
+    def set_screen(self, name):
+        super().set_screen(name)
+        self.menu_first = 0
 
     # ------------------------------------------------------------------
     # Small formatting helpers
@@ -67,8 +102,6 @@ class App(V71App):
         right = x1 - MENU_WIDTH - 12 if self.menu_visible else x1
         antenna = self.s.screen == "ANTENNA ANALYZER"
 
-        # Fixed vertical zones.  These are intentionally explicit so a future
-        # STM32 renderer can use the same geometry contract.
         header_top = y0
         header_bottom = y0 + 96
         measure_top = header_bottom
@@ -87,7 +120,7 @@ class App(V71App):
         py0 = graph_top
         py1 = graph_bottom
 
-        # ---------------- Header ----------------
+        # Header
         self.txt(x0, header_top, f"TR4132N / TR1604-PRO     {self.s.screen}", G, TI)
         self.txt(x0, header_top + 34, f"CENTER {self.s.center:.6f} MHz\nSPAN   {self.s.span:.6f} MHz")
         if antenna:
@@ -103,12 +136,12 @@ class App(V71App):
             TI,
         )
 
-        # ---------------- Measurement bar ----------------
+        # Measurement bar
         dtext, dcol = self._delta_readout(antenna)
         self.txt(px0, measure_top + 4, self._selected_marker_text(antenna), BR, SM)
         self.txt(px1, measure_top + 4, dtext, dcol, SM, "ne")
 
-        # ---------------- Graph / graticule ----------------
+        # Graph / graticule
         self.c.create_rectangle(px0, py0, px1, py1, outline=G, width=2)
         for i in range(11):
             xx = px0 + (px1 - px0) * i / 10.0
@@ -121,13 +154,12 @@ class App(V71App):
                 label = f"{self.ref_level - 10.0 * i:.0f}"
             self.txt(px0 - 10, yy, label, G, SM, "e")
 
-        # 5 dB minor ticks for normal analyzer displays.
         if not antenna:
             for i in range(10):
                 yy = py0 + (py1 - py0) * (i + 0.5) / 10.0
                 self.c.create_line(px0 - 5, yy, px0 + 5, yy, fill=D)
 
-        # Trace A with a restrained phosphor persistence ghost.
+        # Trace A
         pts = []
         ghost = []
         for i in range(700):
@@ -141,13 +173,13 @@ class App(V71App):
             self.c.create_line(*ghost, fill=D, width=1)
         self.c.create_line(*pts, fill=G, width=1)
 
-        # Sweep cursor.
+        # Sweep cursor
         sweep_period = max(0.08, self.s.sweep / 1000.0)
         phase = ((time.monotonic() - self.sweep_started) % sweep_period) / sweep_period
         sx = px0 + (px1 - px0) * phase
         self.c.create_line(sx, py0, sx, py1, fill=BR, width=1)
 
-        # Trace B / reference overlay.
+        # Trace B / reference overlay
         if self.mem_on and self.mem:
             last = min(699, len(self.mem) - 1)
             for i in range(0, last, 4):
@@ -161,7 +193,7 @@ class App(V71App):
                     ya, yb = self._db_y_v7(va, py0, py1), self._db_y_v7(vb, py0, py1)
                 self.c.create_line(xa, ya, xb, yb, fill=Y, width=2)
 
-        # Markers and off-screen indicators.
+        # Markers and off-screen indicators
         colours = (Y, C, G, BR)
         for i, m in enumerate(self.s.markers):
             if not m.enabled:
@@ -178,12 +210,12 @@ class App(V71App):
             self.c.create_line(xx, py0, xx, py1, fill=colours[i], dash=(5, 4))
             self.txt(xx, max(py0 + 12, yy - 16), str(i + 1), colours[i], TI, "center")
 
-        # Frequency bar is isolated from markers/status.
+        # Frequency bar
         self.txt(px0, freq_top, f"START {self.s.start:.6f} MHz")
         self.txt((px0 + px1) / 2, freq_top, f"CENTER {self.s.center:.6f} MHz", G, FN, "n")
         self.txt(px1, freq_top, f"STOP {self.s.stop:.6f} MHz", G, FN, "ne")
 
-        # ---------------- Marker bank ----------------
+        # Marker bank
         bw = (px1 - px0) / 4.0
         for i in range(4):
             xa = px0 + i * bw
@@ -197,7 +229,7 @@ class App(V71App):
             text, colour = self._marker_box_text(i, antenna)
             self.txt((xa + xb) / 2, marker_top + 8, text, colour, SM, "n")
 
-        # ---------------- Status bars ----------------
+        # Status bars
         footer_delta, _ = self._delta_readout(antenna)
         tg = f"TG {self.s.tgl:.1f} dBm" if self.s.tg else "TG OFF"
         self.txt(
@@ -220,7 +252,7 @@ class App(V71App):
             SM,
         )
 
-        # ---------------- Softkeys ----------------
+        # Softkeys
         self.txt(
             px0,
             softkey_y,
@@ -229,23 +261,37 @@ class App(V71App):
             SM,
         )
 
-        # ---------------- Context menu ----------------
+        # Context menu - exactly 12 visible function rows.
         if self.menu_visible:
+            self._sync_menu_view()
             mx = right + 18
             self.c.create_line(mx - 10, y0 + 12, mx - 10, h - 40, fill=G)
             self.txt(mx, y0 + 16, self.s.screen, G, TI)
-            yy = y0 + 52
-            max_y = h - 55
-            for i, item in enumerate(MENUS[self.s.screen]):
-                if yy > max_y:
-                    self.txt(mx + 4, max_y, "...", D, SM)
-                    break
-                if i == self.s.menu:
+
+            items = MENUS[self.s.screen]
+            first = self.menu_first
+            last = min(len(items), first + MENU_ROWS)
+            yy = y0 + 62
+
+            if first > 0:
+                self.txt(x1 - 8, y0 + 40, "▲ MORE", D, SM, "ne")
+
+            for index in range(first, last):
+                item = items[index]
+                if index == self.s.menu:
                     self.c.create_rectangle(mx - 4, yy - 2, x1 - 4, yy + 19, outline=G)
                     self.txt(mx + 4, yy, "> " + item, BR, SM)
                 else:
                     self.txt(mx + 4, yy, "  " + item, G, SM)
                 yy += 24
+
+            if last < len(items):
+                self.txt(x1 - 8, yy + 2, "▼ MORE", D, SM, "ne")
+
+            page = first // MENU_ROWS + 1
+            pages = (len(items) + MENU_ROWS - 1) // MENU_ROWS
+            if pages > 1:
+                self.txt(mx + 4, yy + 2, f"PAGE {page}/{pages}", D, SM)
         else:
             self.txt(x1 - 4, softkey_y, "M MENU", D, SM, "ne")
 
@@ -256,14 +302,14 @@ class App(V71App):
                 "SERVICE INFORMATION",
                 f"FW {FW}\nBUILD {BUILD}\nTRACE {self.trace_mode}\nTG MODE {self.tg_mode}\n"
                 f"CRT PERSIST {self.crt_persistence:.0f}%\nCRT INTENSITY {self.crt_intensity:.0f}%\n"
-                f"DATA {self.usb_mode}\nUSB {self.usb_status}",
+                f"MENU ROWS {MENU_ROWS}\nDATA {self.usb_mode}\nUSB {self.usb_status}",
             )
             return
         if item == "ABOUT":
             self.msg(
                 "TR1604-PRO",
-                f"Firmware {FW}\nV7.2 Modular Fixed-Zone Renderer\nV7.1 Measurement / Trace Engine\n"
-                "Digital Memory / Tracking Generator\nAntenna SWR / Return Loss",
+                f"Firmware {FW}\nV7.2 Modular Fixed-Zone Renderer\n12-row paged context menu\n"
+                "V7.1 Measurement / Trace Engine\nDigital Memory / Tracking Generator\nAntenna SWR / Return Loss",
             )
             return
         super().activate()
