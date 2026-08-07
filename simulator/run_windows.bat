@@ -2,8 +2,8 @@
 setlocal
 where py >nul 2>nul
 if %errorlevel%==0 (
-  py -3 "%~dp0tr1604_sim_v61.py"
+  py -3 "%~dp0tr1604_sim_v62.py"
 ) else (
-  python "%~dp0tr1604_sim_v61.py"
+  python "%~dp0tr1604_sim_v62.py"
 )
 if errorlevel 1 pause
