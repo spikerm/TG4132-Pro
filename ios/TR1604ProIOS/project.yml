@@ -1,0 +1,26 @@
+name: TR1604ProIOS
+options:
+  bundleIdPrefix: nl.pd1dmr
+settings:
+  base:
+    IPHONEOS_DEPLOYMENT_TARGET: 17.0
+    SWIFT_VERSION: 5.9
+targets:
+  TR1604ProIOS:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: Sources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: nl.pd1dmr.tr1604pro.ios
+        PRODUCT_NAME: TR1604-Pro
+        TARGETED_DEVICE_FAMILY: 1
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone: UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight
+        GENERATE_INFOPLIST_FILE: YES
+    scheme:
+      gatherCoverageData: false
